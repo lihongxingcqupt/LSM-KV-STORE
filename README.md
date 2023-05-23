@@ -15,3 +15,7 @@
 ## 实现语言及知识点
 <img src="https://img.shields.io/badge/Java-100%25-yellowgreen" /> <img src="https://img.shields.io/badge/%E6%9E%B6%E6%9E%84-LSM-orange" /> <img src="https://img.shields.io/badge/%E5%86%85%E5%AD%98-Skip%20List-important" /> <img src="https://img.shields.io/badge/%E7%A3%81%E7%9B%98-SSTable-yellow" />
 
+## 项目结构
+* [constant](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fconstant) 包下是一些抽离出来的可配置常量，便于维护。
+* [model](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fmodel) 包下的 [commond](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fmodel%2Fcommond) 包中是几种不同的命令对象，其中定义 [Command.java](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fmodel%2Fcommond%2FCommand.java) 来规范命令对象的行为， [AbstractCommand.java](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fmodel%2Fcommond%2FAbstractCommand.java) 为了方便复用，在这种追加写模式的存储引擎中，set 操作可以实现增、改。
+
