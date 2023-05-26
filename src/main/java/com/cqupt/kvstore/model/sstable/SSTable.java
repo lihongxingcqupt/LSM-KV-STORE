@@ -194,6 +194,8 @@ public class SSTable implements Cloneable {
 
     /**
      * 从文件中恢复sstable到内存
+     * 将指定的文件传入后通过该文件反着去读取索引、元信息
+     * 这里没有读取真正的数据
      */
     private void restoreFromFile() {
         try {
@@ -202,15 +204,24 @@ public class SSTable implements Cloneable {
 
             // 读取稀疏索引
             byte[] indexBytes = new byte[(int) tableMetaInfo.getIndexLen()];
+            // 根据偏移量读取
             tableFile.seek(tableMetaInfo.getIndexStart());
             tableFile.read(indexBytes);
             String indexStr = new String(indexBytes, StandardCharsets.UTF_8);
+            // 读出来的信息是 TreeMap 索引序列化后的字符串，将其反序列化
             this.sparseIndex = JSONObject.parseObject(indexStr,
                     new TypeReference<TreeMap<String, Position>>() {
                     });
-//            tableMetaInfo.setNumber(FileUtils.);
+            // 根据文件全路径推出其文件编号
+            tableMetaInfo.setNumber(FileUtils.parseFileNumber(filePath));
+            this.tableMetaInfo = tableMetaInfo;
+            this.level = FileUtils.parseSsTableFileLevel(filePath);
         } catch (Throwable t) {
             throw new RuntimeException(t);
         }
     }
+
+    /**
+     *
+     */
 }
