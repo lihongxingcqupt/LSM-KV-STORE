@@ -6,17 +6,19 @@ import com.cqupt.kvstore.model.Position;
 import com.cqupt.kvstore.model.commond.Command;
 import com.cqupt.kvstore.model.commond.RmCommand;
 import com.cqupt.kvstore.model.commond.SetCommand;
+import com.cqupt.kvstore.utils.BlockUtils;
+import com.cqupt.kvstore.utils.ConvertUtil;
 import com.cqupt.kvstore.utils.FileUtils;
 import lombok.Data;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xerial.snappy.Snappy;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
-import java.util.Optional;
-import java.util.TreeMap;
+import java.util.*;
 import java.util.concurrent.ConcurrentSkipListMap;
 
 /**
@@ -26,7 +28,7 @@ import java.util.concurrent.ConcurrentSkipListMap;
  * @Date 2023/5/24 20:27
  */
 @Data
-public class SSTable implements Cloneable {
+public class SSTable implements Closeable {
     private final Logger LOGGER = LoggerFactory.getLogger(SSTable.class);
 
     public static final String RW = "rw";
@@ -222,6 +224,65 @@ public class SSTable implements Cloneable {
     }
 
     /**
-     *
+     * 从ssTable中查询数据
+     * 支持压缩的版本
      */
+    public Command query(String key){
+        try{
+            LinkedList<Position> sparseKeyPositionList = new LinkedList<>();
+            // 从稀疏索引中找到最后一个小于key的位置，以及第一个大于key的位置
+            for(String k : sparseIndex.keySet()){
+                if(k.compareTo(key) < 0){
+                    sparseKeyPositionList.add(sparseIndex.get(k));
+                }else{
+                    break;
+                }
+            }
+            // 他笔所有的都大，因此他不在这里
+            if(sparseKeyPositionList.size() == 0){
+                return null;
+            }
+
+            // 读取数据块的内容
+            for(Position position : sparseKeyPositionList){
+                JSONObject dataPartJson = BlockUtils.readJsonObject(position, enablePartDataCompress, tableFile);
+                if(dataPartJson.containsKey(key)){
+                    // 如果这一段数据里面还有key，为什么能这样是因为 Json 串本来就是key-value的形式，直接用key获取也是正常
+                    JSONObject value = dataPartJson.getJSONObject(key);
+                    return ConvertUtil.jsonToCommand(value);
+                }
+            }
+            return null;
+        }catch (Throwable t){
+            throw new RuntimeException(t);
+        }
+    }
+
+    /**
+     * 以文件来构建ssTable
+     */
+    public static SSTable createFromFile(String filePath,boolean enablePartDataCompress){
+        SSTable ssTable = new SSTable(filePath,enablePartDataCompress);
+        ssTable.restoreFromFile();
+        return ssTable;
+    }
+
+    @Override
+    public void close() throws IOException {
+        tableFile.close();
+    }
+
+    @Override
+    public String toString() {
+        Map<String, Object> result = new HashMap<>();
+        result.put("tableMetaInfo", tableMetaInfo.toString());
+        result.put("level", level);
+        result.put("sparseIndex", sparseIndex.toString());
+        result.put("filePath", filePath);
+        return result.toString();
+    }
+
+    public Long getFileNumber() {
+        return this.tableMetaInfo.getNumber();
+    }
 }

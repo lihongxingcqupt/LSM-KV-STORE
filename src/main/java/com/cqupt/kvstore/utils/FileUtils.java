@@ -29,7 +29,7 @@ public class FileUtils {
             // 参数为空
             return -99L;
         }
-        Integer lastIndex = filePath.lastIndexOf('/');
+        Integer lastIndex = filePath.lastIndexOf('\\');
         if(lastIndex == -1){
             return -99L;
         }
@@ -46,7 +46,7 @@ public class FileUtils {
             return -99;
         }
 
-        Integer lastIndex = filePath.lastIndexOf('/');
+        Integer lastIndex = filePath.lastIndexOf('\\');
         if (lastIndex == -1) {
             return -99;
         }

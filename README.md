@@ -14,6 +14,8 @@
 
 ## 实现语言及知识点
 <img src="https://img.shields.io/badge/Java-100%25-yellowgreen" /> <img src="https://img.shields.io/badge/%E6%9E%B6%E6%9E%84-LSM-orange" /> <img src="https://img.shields.io/badge/%E5%86%85%E5%AD%98-Skip%20List-important" /> <img src="https://img.shields.io/badge/%E7%A3%81%E7%9B%98-SSTable-yellow" />
+<img src="https://img.shields.io/badge/%E7%B4%A2%E5%BC%95-%E7%BA%A2%E9%BB%91%E6%A0%91%E7%BB%93%E6%9E%84%EF%BC%8C%E7%A8%80%E7%96%8F%E7%B4%A2%E5%BC%95%E5%AD%98%E5%82%A8-blue" />
+<img src="https://img.shields.io/badge/%E6%95%B0%E6%8D%AE%E5%8E%8B%E7%BC%A9-snappy-brightgreen" />
 
 ## 项目结构
 * [constant](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fconstant) 包下是一些抽离出来的可配置常量，便于维护。
@@ -92,5 +94,41 @@
          */
         firstKey.ifPresent(key -> sparseIndex.put(key,new Position(start,finalPartDataBytes.length)));
         partData.clear();
+    }
+```
+2、通过ssTable根据key来找值，先遍历当前sstable的索引，当前索引不同的是它是稀疏索引，存的是那一块的第一个key，因此只要当前要找的key要小就有可能
+因此，在一个sstable内部来查找数据就是遍历索引中的key，当前key小于目标key就将这个key对应的position放入集合，完了遍历集合，通过position去拿到这段
+JSON，完了判断当前的key在不在即可。
+```
+public Command query(String key) {
+        try {
+            LinkedList<Position> sparseKeyPositionList = new LinkedList<>();
+            //从稀疏索引中找到最后一个小于key的位置，以及第一个大于key的位置
+            for (String k : sparseIndex.keySet()) {
+                if (k.compareTo(key) <= 0) {
+                    sparseKeyPositionList.add(sparseIndex.get(k));
+                } else {
+                    break;
+                }
+            }
+            if (sparseKeyPositionList.size() == 0) {
+                return null;
+            }
+            LoggerUtil.debug(LOGGER, "[SsTable][restoreFromFile][sparseKeyPositionList]: {}", sparseKeyPositionList);
+            //TODO 不同dataPart并不是按顺序存在内存上的呀？（但是不同dataPart之间的数据是按顺序的）
+            //读取数据块的内容
+            for (Position position : sparseKeyPositionList) {
+                JSONObject dataPartJson = BlockUtils.readJsonObject(position, enablePartDataCompress, tableFile);
+                LoggerUtil.debug(LOGGER, "[SsTable][restoreFromFile][dataPartJson]: {}", dataPartJson);
+                if (dataPartJson.containsKey(key)) {
+                    JSONObject value = dataPartJson.getJSONObject(key);
+                    return ConvertUtil.jsonToCommand(value);
+                }
+            }
+            return null;
+        } catch (Throwable t) {
+            t.printStackTrace();
+            throw new RuntimeException(t);
+        }
     }
 ```
