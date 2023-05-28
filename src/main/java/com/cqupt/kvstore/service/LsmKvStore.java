@@ -68,6 +68,7 @@ public class LsmKvStore implements KvStore {
             wal = new RandomAccessFile(dataDir + WAL, RM_MODE);
             compactioner = new Compactioner();
 
+
             /**
              * 目录是下是空的，不用加载sstable，否则要将sstable加载进来
              */
