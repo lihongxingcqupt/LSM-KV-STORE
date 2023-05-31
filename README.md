@@ -132,3 +132,69 @@ public Command query(String key) {
         }
     }
 ```
+
+3、set的流程
+先存内存，内存达到阈值后调用switchIndex将内存冻结、生产walTmp，将数据写入第0层：
+```
+    public void set(String key, String value) {
+        try {
+            SetCommand command = new SetCommand(key, value);
+            byte[] commandBytes = JSONObject.toJSONBytes(command);
+            indexLock.writeLock().lock();
+            //先保存数据到WAL中
+            wal.writeInt(commandBytes.length);
+            wal.write(commandBytes);
+            memtable.put(key, command);
+
+            //内存表大小超过阈值进行持久化
+            if (memtable.size() > storeThreshold) {
+                switchIndex();
+                dumpToL0SsTable();
+            }
+        } catch (Throwable t) {
+            t.printStackTrace();
+            throw new RuntimeException(t);
+        } finally {
+            indexLock.writeLock().unlock();
+        }
+    }
+
+```
+在0层的ssTable数量达到一定数值以后再compaction至高层
+
+4、get的实现：
+```
+ @Override
+    public String get(String key) {
+        try {
+            indexLock.readLock().lock();
+            // 先从内存中找
+            Command command = memtable.get(key);
+
+            // 内存中找不到从冻结内存中找
+            if(command == null && immutableMemtable != null){
+                command = immutableMemtable.get(key);
+            }
+
+            // 还是没找到就去持久层开始找了
+            if(command == null){
+                command = findFromSsTable(key);
+            }
+
+            // 因为是从后往前找的，假如找到了set，那对应的value就是值
+            if(command instanceof SetCommand){
+                return ((SetCommand)command).getKey();
+            }
+
+            // 假如先找到了删除命令，那就说明这个键被删除了，返回null
+            if(command instanceof RmCommand){
+                return null;
+            }
+            // 什么也找不到
+            return null;
+        }catch (Throwable t){
+            throw new RuntimeException(t);
+        }
+
+    }
+```
