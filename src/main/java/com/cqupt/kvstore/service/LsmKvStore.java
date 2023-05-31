@@ -5,9 +5,12 @@ import com.alibaba.fastjson.JSONObject;
 import com.cqupt.kvstore.compaction.Compactioner;
 import com.cqupt.kvstore.constant.KvConstant;
 import com.cqupt.kvstore.model.commond.Command;
+import com.cqupt.kvstore.model.commond.RmCommand;
 import com.cqupt.kvstore.model.commond.SetCommand;
 import com.cqupt.kvstore.model.sstable.SSTable;
 import com.cqupt.kvstore.utils.ConvertUtil;
+import com.google.errorprone.annotations.Var;
+import org.apache.commons.collections.CollectionUtils;
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -245,7 +248,7 @@ public class LsmKvStore implements KvStore {
             if(tmpWal.exists()){
                 tmpWal.delete();
             }
-            // 可能会触发compaction
+            // TODO 可能会触发compaction
         }catch (Throwable t){
             throw new RuntimeException(t);
         }
@@ -281,6 +284,147 @@ public class LsmKvStore implements KvStore {
 
     @Override
     public String get(String key) {
+        try {
+            indexLock.readLock().lock();
+            // 先从内存中找
+            Command command = memtable.get(key);
+
+            // 内存中找不到从冻结内存中找
+            if(command == null && immutableMemtable != null){
+                command = immutableMemtable.get(key);
+            }
+
+            // 还是没找到就去持久层开始找了
+            if(command == null){
+                command = findFromSsTable(key);
+            }
+
+            // 因为是从后往前找的，假如找到了set，那对应的value就是值
+            if(command instanceof SetCommand){
+                return ((SetCommand)command).getKey();
+            }
+
+            // 假如先找到了删除命令，那就说明这个键被删除了，返回null
+            if(command instanceof RmCommand){
+                return null;
+            }
+            // 什么也找不到
+            return null;
+        }catch (Throwable t){
+            throw new RuntimeException(t);
+        }
+
+    }
+
+    /**
+     * 内存中没找到就来ssTable中也就是磁盘中开始找
+     * @param key
+     * @return
+     */
+    private Command findFromSsTable(String key) {
+        // 1、查找level0
+        Command l0Result = findFromL0SsTable(key);
+        if(l0Result != null){
+            return l0Result;
+        }
+
+        // 2、第一层没找到，下沉，往下找
+        for(int level = 1;level < KvConstant.SSTABLE_MAX_LEVEL;++level){
+            Command otherLevelResult = findFromOtherLevelSsTable(key,level);
+            if(otherLevelResult != null){
+                return otherLevelResult;
+            }
+        }
+        return null;
+    }
+
+
+
+    /**
+     * 从第0层找数据，先从levelInfo中将对应层的全部ssTable集合拿出来后将其按编号从大到小排序以后开始遍历
+     * @param key
+     * @return
+     */
+    private Command findFromL0SsTable(String key) {
+        List<SSTable> l0SsTables = levelMetaInfos.get(0);
+        if(CollectionUtils.isEmpty(l0SsTables)){
+            return null;
+        }
+
+        // 将该层的sstable按编号从大到小排序，找的话就是从大到小来找，一旦找到就返回，这样找到的就是最新的数据
+        l0SsTables.sort((sstable1,sstable2)->{
+            if(sstable1.getFileNumber() < sstable2.getFileNumber()){
+                return 1;
+            }else if(sstable1.getFileNumber() == sstable2.getFileNumber()){
+                return 0;
+            }else{
+                return  -1;
+            }
+        });
+
+        // 存在多个key相同的数据时以最新的为准
+        for (SSTable ssTable : l0SsTables){
+            Command query = ssTable.query(key);
+            if(query != null){
+                return query;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 从别的层来找，别的层是块间有序的，可以进行二分查找
+     * @param key
+     * @param level
+     * @return
+     */
+    private Command findFromOtherLevelSsTable(String key, int level) {
+        List<SSTable> ssTables = levelMetaInfos.get(level);
+        if(CollectionUtils.isEmpty(ssTables)){
+            return null;
+        }
+
+        // 按照ssTable中的最小key来从小到大排序
+        ssTables.sort((sstable1,sstable2) -> {
+            if(sstable1.getTableMetaInfo().getSmallestKey().compareTo(sstable2.getTableMetaInfo().getSmallestKey()) < 0){
+                return -1;
+            } else if (sstable1.getTableMetaInfo().getSmallestKey().compareTo(sstable2.getTableMetaInfo().getSmallestKey()) == 0){
+                return 0;
+            }else{
+                return 1;
+            }
+        });
+        Command command = binarySearchSsTables(key,ssTables);
+        if(command != null){
+            return command;
+        }
+        return null;
+    }
+
+    /**
+     * 高层的块与块之间不存在重复的key了就可以进行二分查找了
+     * @param key
+     * @param ssTables
+     * @return
+     */
+    private Command binarySearchSsTables(String key, List<SSTable> ssTables) {
+        if(ssTables == null){
+            return null;
+        }
+        int left = 0,right = ssTables.size() - 1;
+        while (left <= right) {
+            int mid = left + (right - left) / 2;
+            SSTable midSsTable = ssTables.get(mid);
+            if (key.compareTo(midSsTable.getTableMetaInfo().getSmallestKey()) >= 0
+                    && key.compareTo(midSsTable.getTableMetaInfo().getLargestKey()) <= 0) {
+                return midSsTable.query(key);
+            } else if (key.compareTo(midSsTable.getTableMetaInfo().getSmallestKey()) < 0) {
+                right = mid - 1;
+            } else {
+                left = mid + 1;
+            }
+        }
+
         return null;
     }
 
