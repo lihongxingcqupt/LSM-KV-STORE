@@ -26,5 +26,4 @@ public interface KvStore extends Closeable {
      */
     void rm(String key);
 
-
 }

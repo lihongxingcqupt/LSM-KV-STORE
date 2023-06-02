@@ -9,7 +9,6 @@ import com.cqupt.kvstore.model.commond.RmCommand;
 import com.cqupt.kvstore.model.commond.SetCommand;
 import com.cqupt.kvstore.model.sstable.SSTable;
 import com.cqupt.kvstore.utils.ConvertUtil;
-import com.google.errorprone.annotations.Var;
 import org.apache.commons.collections.CollectionUtils;
 
 import java.io.File;
@@ -248,7 +247,8 @@ public class LsmKvStore implements KvStore {
             if(tmpWal.exists()){
                 tmpWal.delete();
             }
-            // TODO 可能会触发compaction
+            //  可能会触发compaction
+            compactioner.compaction(levelMetaInfos,nextFileNumber);
         }catch (Throwable t){
             throw new RuntimeException(t);
         }
@@ -428,13 +428,51 @@ public class LsmKvStore implements KvStore {
         return null;
     }
 
+    /**
+     * 删除数据其实和写入是一样的，因为是追加写的方式，从后往前去找，假如找到的是删除，那就说明这个键被删了，就直接返回null
+     * @param key
+     */
     @Override
     public void rm(String key) {
-
+        try {
+            indexLock.writeLock().lock();
+            RmCommand rmCommand = new RmCommand(key);
+            byte[] commandBytes = JSONObject.toJSONBytes(rmCommand);
+            // 先日志进行记录，防止宕机导致内存数据丢失
+            wal.writeInt(commandBytes.length);
+            wal.write(commandBytes);
+            memtable.put(key,rmCommand);
+            if(memtable.size() > storeThreshold){
+                switchIndex();
+                dumpToL0SsTable();
+            }
+        }catch (Throwable t){
+            throw new RuntimeException(t);
+        }finally {
+            indexLock.writeLock().unlock();
+        }
     }
 
+
+
+    /**
+     * 将文件流全部关闭
+     * @throws IOException
+     */
     @Override
     public void close() throws IOException {
-
+        wal.close();
+        for(List<SSTable> ssTableList : levelMetaInfos.values()){
+            ssTableList.forEach(ssTable -> {
+                try {
+                    ssTable.close();
+                }catch (IOException e){
+                    throw new RuntimeException(e);
+                }
+            });
+        }
     }
+
+
+
 }

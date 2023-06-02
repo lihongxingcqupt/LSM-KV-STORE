@@ -21,6 +21,9 @@
 * [constant](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fconstant) 包下是一些抽离出来的可配置常量，便于维护。
 * [model](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fmodel) 包下的 [commond](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fmodel%2Fcommond) 包中是几种不同的命令对象，其中定义 [Command.java](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fmodel%2Fcommond%2FCommand.java) 来规范命令对象的行为， [AbstractCommand.java](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fmodel%2Fcommond%2FAbstractCommand.java) 为了方便复用，在这种追加写模式的存储引擎中，set 操作可以实现增、改。
 * [sstable](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fmodel%2Fsstable) 包下是维护SSTable信息的类，其中 [SSTable.java](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fmodel%2Fsstable%2FSSTable.java) 用于初始化 SSTable，最为重要。 [SSTableFileMetaInfo.java](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fmodel%2Fsstable%2FSSTableFileMetaInfo.java) 用于将一个SSTable文件的全部信息收集完毕以后写入磁盘。
+* [utils](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Futils) 包下是基本工具，包括生成文件，找到文件块之类的
+* [service](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fservice) 包下是存储引擎的api实现
+* [compaction](src%2Fmain%2Fjava%2Fcom%2Fcqupt%2Fkvstore%2Fcompaction) 当0层的文件数目达到阈值，用它来实现compaction，将key存在重合的压缩到下一层
 
 ## 核心方法介绍
 1、SSTable 中 initFromIndex() 方法用于将内存中的数据（跳表）持久化到磁盘并在磁盘中存储数据、索引、元信息。索引物理上使用的是稀疏索引，数据结构是红黑树。
@@ -194,6 +197,127 @@ public Command query(String key) {
             return null;
         }catch (Throwable t){
             throw new RuntimeException(t);
+        }
+
+    }
+```
+5、delete和update的实现，其实他们的实现和set是一样的，因为是追加写的方式，当要delete时就new一个类型为rm的Command，追加写入文件编号最大的文件
+当查找数据的时候是从后往前，那么去查找一个key，先找到的command是rm，那直接return null就行了。update同理。
+```
+    public void rm(String key) {
+        try {
+            indexLock.writeLock().lock();
+            RmCommand rmCommand = new RmCommand(key);
+            byte[] commandBytes = JSONObject.toJSONBytes(rmCommand);
+            // 先日志进行记录，防止宕机导致内存数据丢失
+            wal.writeInt(commandBytes.length);
+            wal.write(commandBytes);
+            memtable.put(key,rmCommand);
+            if(memtable.size() > storeThreshold){
+                switchIndex();
+                dumpToL0SsTable();
+            }
+        }catch (Throwable t){
+            throw new RuntimeException(t);
+        }finally {
+            indexLock.writeLock().unlock();
+        }
+    }
+```
+
+6、compaction的逻辑：先判断是否要compaction，如果要，那就将当层所有key重复的sstable添加到一个集合，再将下一层有重合的sstable也获取到一个集合
+完了以后将它们三个文件编号进行排序，去合并的时候，遇到相同的key，用文件编号大的将其覆盖就实现了合并，再之后将之前被合并的删除。
+```
+private void doBackgroundCompaction(Map<Integer, List<SSTable>> levelMetaInfos, AtomicLong nextFileNumber) throws IOException {
+        // 先判断l0是否触发compaction
+        if(levelMetaInfos.get(0).size() <= L0_DUMP_MAX_FILE_NUM){
+            return;
+        }
+        // 1、执行l0的compaction，找出和当前新产生的sstable存在重合key的sstable，将他们和下一个level存在key重合的sstable进行合并，并写入下一个level
+
+        // 当前新产生的l0的sstable一定是文件编号最大的
+        List<SSTable> l0SSTables = levelMetaInfos.get(0);
+        Optional<SSTable> maxFileNumberOptional = l0SSTables.stream().max(Comparator.comparing(SSTable::getFileNumber));
+        SSTable lastL0SSTable = maxFileNumberOptional.get();
+        List<SSTable> overlappedL0SSTableFileMetaInfos = findOverLapSSTables(lastL0SSTable.getTableMetaInfo().getSmallestKey(), lastL0SSTable.getTableMetaInfo().getLargestKey(), l0SSTables);
+
+        // 计算一批sstable文件覆盖的索引范围
+        String smallestKey = null;
+        String largestKey = null;
+        for (SSTable ssTableFileMetaInfo : overlappedL0SSTableFileMetaInfos) {
+            if(smallestKey == null || smallestKey.compareTo(ssTableFileMetaInfo.getTableMetaInfo().getSmallestKey()) > 0){
+                smallestKey = ssTableFileMetaInfo.getTableMetaInfo().getSmallestKey();
+            }
+            if(largestKey == null || largestKey.compareTo(ssTableFileMetaInfo.getTableMetaInfo().getLargestKey()) < 0){
+                largestKey = ssTableFileMetaInfo.getTableMetaInfo().getLargestKey();
+            }
+        }
+        // 再获取l1存在重合key的sstable
+        List<SSTable> overlappedL1SSTableFileMetaInfos = findOverLapSSTables(smallestKey, largestKey, levelMetaInfos.get(1));
+
+        // 合并成一个文件放到l1
+        List<SSTable> overlappedSstables = new ArrayList<>();
+
+        /**
+         * 将l0和l1存在key重合的先放到一起
+         */
+        if(!CollectionUtils.isEmpty(overlappedL0SSTableFileMetaInfos)){
+            overlappedSstables.addAll(overlappedL0SSTableFileMetaInfos);
+        }
+
+        if (!CollectionUtils.isEmpty(overlappedL1SSTableFileMetaInfos)) {
+            overlappedSstables.addAll(overlappedL1SSTableFileMetaInfos);
+        }
+
+        /**
+         * 按文件编号进行排序
+         */
+        overlappedSstables.sort((sstable1,sstable2) -> {
+            if(sstable1.getFileNumber() < sstable2.getFileNumber()){
+                return -1;
+            }else if(sstable1.getFileNumber() == sstable2.getFileNumber()){
+                return 0;
+            }else{
+                return 1;
+            }
+        });
+
+        ConcurrentSkipListMap<String, Command> mergeData = new ConcurrentSkipListMap<>();
+        /**
+         * 调用此方法相当于根据key来去重，将重复的key去除了
+         */
+        mergeSSTable(overlappedSstables,mergeData);
+        SSTable newSsTable = SSTable.createFromIndex(nextFileNumber.getAndIncrement(), 4, mergeData, true, 1);
+        List<SSTable> l1SSTables = levelMetaInfos.get(1);
+        if(l1SSTables == null){
+            l1SSTables = new ArrayList<>();
+            levelMetaInfos.put(1,l1SSTables);
+        }
+        l1SSTables.add(newSsTable);
+
+        /**
+         * 将被合并了的sstable删除，分别将它从该层的sstable集合中删除，还有拿到文件，将该文件删除
+         */
+        Iterator<SSTable> l0SSTableIterator = l0SSTables.iterator();
+        while (l0SSTableIterator.hasNext()){
+            SSTable tempSSTable = l0SSTableIterator.next();
+            if(containTheSSTable(overlappedL0SSTableFileMetaInfos,tempSSTable.getFileNumber())){
+                l0SSTableIterator.remove();
+                tempSSTable.close();
+                File tmpSSTableFile = new File(FileUtils.buildSStableFilePath(tempSSTable.getFileNumber(), 0));
+                tmpSSTableFile.delete();
+            }
+        }
+
+        Iterator l1SstableIterator = l1SSTables.iterator();
+        while (l1SstableIterator.hasNext()) {
+            SSTable tempSsTable = (SSTable) l1SstableIterator.next();
+            if (containTheSSTable(overlappedL1SSTableFileMetaInfos, tempSsTable.getFileNumber())) {
+                l1SstableIterator.remove();
+                tempSsTable.close();
+                File tmpSstableFile = new File(FileUtils.buildSStableFilePath(tempSsTable.getFileNumber(), 0));
+                tmpSstableFile.delete();
+            }
         }
 
     }
