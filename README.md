@@ -322,3 +322,26 @@ private void doBackgroundCompaction(Map<Integer, List<SSTable>> levelMetaInfos, 
 
     }
 ```
+7、引入布隆过滤器，在要查询一个key的时候，先去通过布隆过滤器看一下这个键在不在，假如返回false，则一定不在，这时候就能直接返回false而不需要去不断的去查询，
+另外，如果它返回true只能说明可能在而不是一定在，因为哈希冲突，为什么要引入它就是它的时间复杂度是O(N)而空间复杂度仅仅是创建一个哈希表，假如使用hashmap这种
+空间复杂度就会很高了。
+```
+        <dependency>
+			<groupId>com.google.guava</groupId>
+			<artifactId>guava</artifactId>
+			<version>30.0-jre</version>
+		</dependency>
+		
+        this.bloomFilter = BloomFilter.create(Funnels.stringFunnel(Charset.defaultCharset()), expectedSize, falsePositiveRate);
+        public void set(String key, String value) {
+        try {
+            bloomFilter.put(key);
+
+        public String get(String key) {
+        try {
+            /**
+             * 检查布隆过滤器，假如返回false说明不在存储引擎里面，直接返回null，避免了不断去找数据的开销
+             */
+            if (!bloomFilter.mightContain(key)) {
+                return null;
+            }

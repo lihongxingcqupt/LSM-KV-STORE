@@ -9,12 +9,15 @@ import com.cqupt.kvstore.model.commond.RmCommand;
 import com.cqupt.kvstore.model.commond.SetCommand;
 import com.cqupt.kvstore.model.sstable.SSTable;
 import com.cqupt.kvstore.utils.ConvertUtil;
+import com.google.common.hash.BloomFilter;
+import com.google.common.hash.Funnels;
 import org.apache.commons.collections.CollectionUtils;
 
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -100,7 +103,8 @@ public class LsmKvStore implements KvStore {
      */
     private Compactioner compactioner;
 
-    public LsmKvStore(String dataDir, int storeThreshold, int partSize) {
+    private BloomFilter<CharSequence> bloomFilter;
+    public LsmKvStore(String dataDir, int storeThreshold, int partSize,int expectedSize, double falsePositiveRate) {
         try {
             this.dataDir = dataDir;
             this.storeThreshold = storeThreshold;
@@ -113,8 +117,7 @@ public class LsmKvStore implements KvStore {
             walFile = new File(dataDir + WAL);
             wal = new RandomAccessFile(dataDir + WAL, RM_MODE);
             compactioner = new Compactioner();
-
-
+            this.bloomFilter = BloomFilter.create(Funnels.stringFunnel(Charset.defaultCharset()), expectedSize, falsePositiveRate);
             /**
              * 目录是下是空的，不用加载sstable，否则要将sstable加载进来
              */
@@ -207,6 +210,7 @@ public class LsmKvStore implements KvStore {
     @Override
     public void set(String key, String value) {
         try {
+            bloomFilter.put(key);
             SetCommand command = new SetCommand(key, value);
             byte[] commandBytes = JSONObject.toJSONBytes(command);
             indexLock.writeLock().lock();
@@ -285,6 +289,12 @@ public class LsmKvStore implements KvStore {
     @Override
     public String get(String key) {
         try {
+            /**
+             * 检查布隆过滤器，假如返回false说明不在存储引擎里面，直接返回null，避免了不断去找数据的开销
+             */
+            if (!bloomFilter.mightContain(key)) {
+                return null;
+            }
             indexLock.readLock().lock();
             // 先从内存中找
             Command command = memtable.get(key);
@@ -435,6 +445,9 @@ public class LsmKvStore implements KvStore {
     @Override
     public void rm(String key) {
         try {
+            /**
+             * 布隆过滤器不支持删除，因为有可能导致别的键出现问题而致使误判
+             */
             indexLock.writeLock().lock();
             RmCommand rmCommand = new RmCommand(key);
             byte[] commandBytes = JSONObject.toJSONBytes(rmCommand);
