@@ -3,8 +3,10 @@ package com.cqupt.kvstore.compaction;
 import com.alibaba.fastjson.JSONObject;
 import com.cqupt.kvstore.model.Position;
 import com.cqupt.kvstore.model.commond.Command;
+import com.cqupt.kvstore.model.commond.RmCommand;
 import com.cqupt.kvstore.model.sstable.SSTable;
 import com.cqupt.kvstore.utils.BlockUtils;
+import com.cqupt.kvstore.utils.ConvertUtil;
 import com.cqupt.kvstore.utils.FileUtils;
 import org.apache.commons.collections.CollectionUtils;
 
@@ -150,6 +152,15 @@ public class Compactioner {
     private void mergeSSTable(List<SSTable> ssTableList, ConcurrentSkipListMap<String, Command> mergeData) {
         ssTableList.forEach(ssTable -> {
             Map<String, JSONObject> jsonObjectMap = readSSTableConten(ssTable);
+            for (Map.Entry<String, JSONObject> entry : jsonObjectMap.entrySet()) {
+                Command command = ConvertUtil.jsonToCommand(entry.getValue());
+                //删除数据处理
+                if (command instanceof RmCommand) {
+                    mergeData.remove(command.getKey());
+                } else {
+                    mergeData.put(command.getKey(), command);
+                }
+            }
         });
     }
 
